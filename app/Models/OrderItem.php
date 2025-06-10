@@ -22,6 +22,17 @@ class OrderItem extends Model
         'subtotal' => 'decimal:2',
     ];
 
+    protected static function boot()
+    {
+        parent::boot();
+
+        static::creating(function ($orderItem) {
+            if (empty($orderItem->subtotal)) {
+                $orderItem->subtotal = $orderItem->price * $orderItem->quantity;
+            }
+        });
+    }
+
     public function order()
     {
         return $this->belongsTo(Order::class);

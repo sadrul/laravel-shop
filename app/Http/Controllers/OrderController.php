@@ -16,7 +16,7 @@ class OrderController extends Controller
      */
     public function index()
     {
-        $orders = auth()->user()->orders()->latest()->paginate(10);
+        $orders = auth()->user()->orders()->latest()->get();
         return view('orders.index', compact('orders'));
     }
 
@@ -98,7 +98,11 @@ class OrderController extends Controller
      */
     public function show(Order $order)
     {
-        $this->authorize('view', $order);
+        // Check if the authenticated user owns this order
+        if ($order->user_id !== auth()->id()) {
+            abort(403, 'Unauthorized action.');
+        }
+
         return view('orders.show', compact('order'));
     }
 

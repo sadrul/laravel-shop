@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Support\Str;
 
 class Order extends Model
 {
@@ -11,9 +12,10 @@ class Order extends Model
 
     protected $fillable = [
         'user_id',
-        'order_number',
         'total_amount',
         'status',
+        'order_number',
+        'payment_intent_id',
         'payment_status',
         'shipping_address',
         'shipping_city',
@@ -21,7 +23,7 @@ class Order extends Model
         'shipping_zipcode',
         'shipping_country',
         'shipping_phone',
-        'notes',
+        'notes'
     ];
 
     protected $casts = [
@@ -33,7 +35,15 @@ class Order extends Model
         parent::boot();
 
         static::creating(function ($order) {
-            $order->order_number = 'ORD-' . strtoupper(uniqid());
+            if (empty($order->order_number)) {
+                $order->order_number = 'ORD-' . strtoupper(Str::random(8));
+            }
+            if (empty($order->payment_status)) {
+                $order->payment_status = 'pending';
+            }
+            if (empty($order->status)) {
+                $order->status = 'pending';
+            }
         });
     }
 

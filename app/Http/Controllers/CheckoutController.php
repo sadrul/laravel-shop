@@ -10,6 +10,7 @@ use Stripe\PaymentIntent;
 use Stripe\Exception\ApiErrorException;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 
 class CheckoutController extends Controller
 {
@@ -74,7 +75,9 @@ class CheckoutController extends Controller
     {
         Log::info('Checkout success page accessed', [
             'payment_intent' => $request->get('payment_intent'),
-            'payment_intent_client_secret' => $request->get('payment_intent_client_secret')
+            'payment_intent_client_secret' => $request->get('payment_intent_client_secret'),
+            'session_id' => session()->getId(),
+            'cart' => session()->get('cart')
         ]);
 
         if (!$request->get('payment_intent')) {
@@ -91,7 +94,8 @@ class CheckoutController extends Controller
             Log::info('Payment intent retrieved', [
                 'status' => $paymentIntent->status,
                 'amount' => $paymentIntent->amount,
-                'currency' => $paymentIntent->currency
+                'currency' => $paymentIntent->currency,
+                'id' => $paymentIntent->id
             ]);
 
             if ($paymentIntent->status !== 'succeeded') {
@@ -103,80 +107,128 @@ class CheckoutController extends Controller
             // Check if order already exists for this payment intent
             $existingOrder = Order::where('payment_intent_id', $paymentIntent->id)->first();
             if ($existingOrder) {
-                Log::info('Order already exists for payment intent', ['order_id' => $existingOrder->id]);
+                Log::info('Order already exists for payment intent', [
+                    'order_id' => $existingOrder->id,
+                    'payment_intent_id' => $paymentIntent->id
+                ]);
                 return view('checkout.success', compact('existingOrder'));
             }
 
             $cart = session()->get('cart', []);
             
             if (empty($cart)) {
-                Log::warning('Empty cart on success page');
-                return redirect()->route('cart.index')->with('error', 'Your cart is empty.');
+                Log::warning('Empty cart on success page', [
+                    'session_id' => session()->getId(),
+                    'payment_intent_id' => $paymentIntent->id
+                ]);
+                return redirect()->route('cart.index')
+                    ->with('error', 'Your cart is empty. Please try again.');
             }
 
             DB::beginTransaction();
 
-            // Create the order
-            $order = Order::create([
-                'user_id' => auth()->id(),
-                'total_amount' => $this->calculateTotal($cart),
-                'status' => 'completed',
-                'payment_intent_id' => $paymentIntent->id,
-            ]);
-
-            Log::info('Order created', ['order_id' => $order->id]);
-
-            // Create order items
-            foreach ($cart as $id => $details) {
-                $product = Product::findOrFail($id);
+            try {
+                // Get user's shipping information
+                $user = auth()->user();
                 
-                // Check if enough stock is available
-                if ($product->stock < $details['quantity']) {
-                    throw new \Exception("Not enough stock for {$product->name}");
+                // Create the order
+                $order = new Order();
+                $order->user_id = $user->id;
+                $order->total_amount = $this->calculateTotal($cart);
+                $order->status = 'completed';
+                $order->payment_status = 'paid';
+                $order->payment_intent_id = $paymentIntent->id;
+                $order->order_number = 'ORD-' . strtoupper(Str::random(8));
+                
+                // Get shipping information from the request
+                $shippingInfo = $request->get('shipping_info', []);
+                
+                // Set shipping information
+                $order->shipping_address = $shippingInfo['shipping_address'] ?? $user->address ?? 'Default Address';
+                $order->shipping_city = $shippingInfo['shipping_city'] ?? $user->city ?? 'Default City';
+                $order->shipping_state = $shippingInfo['shipping_state'] ?? $user->state ?? 'Default State';
+                $order->shipping_zipcode = $shippingInfo['shipping_zipcode'] ?? $user->zipcode ?? '00000';
+                $order->shipping_country = $shippingInfo['shipping_country'] ?? $user->country ?? 'Default Country';
+                $order->shipping_phone = $shippingInfo['shipping_phone'] ?? $user->phone ?? '000-000-0000';
+                
+                $order->save();
+
+                Log::info('Order created', [
+                    'order_id' => $order->id,
+                    'order_number' => $order->order_number,
+                    'payment_intent_id' => $paymentIntent->id
+                ]);
+
+                // Create order items
+                foreach ($cart as $id => $details) {
+                    $product = Product::findOrFail($id);
+                    
+                    // Check if enough stock is available
+                    if ($product->stock < $details['quantity']) {
+                        throw new \Exception("Not enough stock for {$product->name}");
+                    }
+
+                    // Calculate subtotal
+                    $subtotal = $details['price'] * $details['quantity'];
+
+                    // Create order item
+                    $order->items()->create([
+                        'product_id' => $id,
+                        'quantity' => $details['quantity'],
+                        'price' => $details['price'],
+                        'subtotal' => $subtotal
+                    ]);
+
+                    // Update product stock
+                    $product->decrement('stock', $details['quantity']);
+
+                    Log::info('Order item created', [
+                        'order_id' => $order->id,
+                        'product_id' => $id,
+                        'quantity' => $details['quantity'],
+                        'subtotal' => $subtotal
+                    ]);
                 }
 
-                // Create order item
-                $order->items()->create([
-                    'product_id' => $id,
-                    'quantity' => $details['quantity'],
-                    'price' => $details['price'],
-                ]);
-
-                // Update product stock
-                $product->decrement('stock', $details['quantity']);
-
-                Log::info('Order item created', [
+                DB::commit();
+                Log::info('Order completed successfully', [
                     'order_id' => $order->id,
-                    'product_id' => $id,
-                    'quantity' => $details['quantity']
+                    'payment_intent_id' => $paymentIntent->id
                 ]);
+
+                // Clear the cart
+                session()->forget('cart');
+
+                return view('checkout.success', compact('order'));
+
+            } catch (\Exception $e) {
+                DB::rollBack();
+                Log::error('Order Creation Error: ' . $e->getMessage(), [
+                    'error' => $e->getMessage(),
+                    'trace' => $e->getTraceAsString(),
+                    'payment_intent_id' => $paymentIntent->id
+                ]);
+                return redirect()->route('cart.index')
+                    ->with('error', 'There was an error creating your order: ' . $e->getMessage());
             }
 
-            DB::commit();
-            Log::info('Order completed successfully', ['order_id' => $order->id]);
-
-            // Clear the cart
-            session()->forget('cart');
-
-            return view('checkout.success', compact('order'));
-
         } catch (ApiErrorException $e) {
-            DB::rollBack();
             Log::error('Stripe API Error: ' . $e->getMessage(), [
                 'error' => $e->getMessage(),
                 'code' => $e->getStripeCode(),
-                'type' => $e->getStripeErrorType()
+                'type' => $e->getStripeErrorType(),
+                'payment_intent_id' => $request->get('payment_intent')
             ]);
             return redirect()->route('cart.index')
                 ->with('error', 'There was an error verifying your payment. Please contact support.');
         } catch (\Exception $e) {
-            DB::rollBack();
-            Log::error('Order Creation Error: ' . $e->getMessage(), [
+            Log::error('Unexpected Error: ' . $e->getMessage(), [
                 'error' => $e->getMessage(),
-                'trace' => $e->getTraceAsString()
+                'trace' => $e->getTraceAsString(),
+                'payment_intent_id' => $request->get('payment_intent')
             ]);
             return redirect()->route('cart.index')
-                ->with('error', 'There was an error creating your order: ' . $e->getMessage());
+                ->with('error', 'An unexpected error occurred. Please try again.');
         }
     }
 
